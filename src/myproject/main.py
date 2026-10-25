@@ -12,6 +12,10 @@ class LogHandler(Handler):
         self.name = name
         self.delay = delay
 
+    @property
+    def handler_id(self) -> str:
+        return self.name
+
     async def __call__(self, e: Event) -> None:
         await asyncio.sleep(self.delay)
         print(

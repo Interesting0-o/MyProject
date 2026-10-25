@@ -4,7 +4,13 @@ from myproject.schema import Event
 
 
 class Handler(ABC):
-    """事件消费者基类，子类需要实现异步处理逻辑。"""
+    """事件消费者基类，子类需要实现唯一标识和异步处理逻辑。"""
+
+    @property
+    @abstractmethod
+    def handler_id(self) -> str:
+        """消费者的唯一标识，用于幂等与去重。"""
+        ...
 
     # 要求子类必须实现一个异步方法
     @abstractmethod
