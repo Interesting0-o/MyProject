@@ -7,7 +7,12 @@ authors = [
     { name = "Interesting0_o", email = "2597256916@qq.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.1",
+    "uuid-utils>=1.1.0",
+    "uuid6>=2025.0.1",
+]
 
 [project.scripts]
 myproject = "myproject:main"
