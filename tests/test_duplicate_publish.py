@@ -72,7 +72,7 @@ async def test_a_concurrent_duplicate_processed_once(capsys):
     assert not flow.failed
     assert not dispatcher.dlq
     assert event.eid in dispatcher.event_state.completed
-    assert dispatcher.handler_state.done == {(event.eid, "recording-handler")}
+    assert not dispatcher.handler_state.done
     assert not dispatcher.handler_state.running
 
     print(output)
@@ -118,7 +118,7 @@ async def test_b_replay_after_failure_succeeds(capsys):
     assert len(dispatcher.dlq) == 1
     assert flow.completed == {EventType.A}
     assert event.eid in dispatcher.event_state.completed
-    assert dispatcher.handler_state.done == {(event.eid, "fail-once-handler")}
+    assert not dispatcher.handler_state.done
 
     print(output)
     print(

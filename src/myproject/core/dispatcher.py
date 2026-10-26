@@ -176,16 +176,21 @@ class Dispatcher:
             if dependent == e_type
         ]
 
-    async def _on_success(self, e: Event):
-        """
-        记录事件处理成功，并唤醒同一业务流程内依赖它的挂起事件。
-
-        只有自身所有依赖都已完成的挂起事件才会被唤醒；已超时的挂起事件
-        不再唤醒，直接按失败处理。被唤醒的事件会先从 waiting 中移除再重新
-        分发，避免被重复唤醒。
-        """
+    def _commit_success(self, e: Event) -> FlowState:
+        """同步提交事件成功状态，保证各视图同时生效。"""
         flow = self._get_flow(e.correlation_id)
+        self.event_state.completed.add(e.eid)
         flow.completed.add(e.event_type)
+        self._clear_handler_state(e.eid)
+        self.event_state.dispatching.discard(e.eid)
+        return flow
+
+    async def _on_success(self, e: Event, flow: FlowState):
+        """
+        唤醒同一业务流程内依赖该事件的挂起事件。
+
+        事件成功状态已由 _commit_success 提交，这里只负责唤醒。
+        """
         print("[info]事件处理成功")
 
         expired: list[Event] = []
@@ -259,6 +264,13 @@ class Dispatcher:
     #                事件分发
     # ==========================================
 
+    def _clear_handler_state(self, eid: str) -> None:
+        """清理指定事件在 handler 颗粒度上的运行与完成状态。"""
+        for state in (self.handler_state.running, self.handler_state.done):
+            for key in tuple(state):
+                if key[0] == eid:
+                    state.discard(key)
+
     async def _with_retry(self, e: Event, handler: Handler) -> str | None:
         """
         执行单个消费者，失败时按指数退避重试。
@@ -311,8 +323,8 @@ class Dispatcher:
                 (result for result in results if result is not None), None
             )
             if failure_reason is None:
-                self.event_state.completed.add(eid)
-                await self._on_success(e)
+                flow = self._commit_success(e)
+                await self._on_success(e, flow)
             else:
                 await self._on_failure(e, failure_reason)
         finally:

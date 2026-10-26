@@ -102,7 +102,7 @@ async def test_replay_failed_dependency_does_not_revive_dependent():
     assert payment.calls == 2
     assert shipping.calls == 0
     assert payment_event.eid in dispatcher.event_state.completed
-    assert dispatcher.handler_state.done == {payment_key}
+    assert not dispatcher.handler_state.done
     assert flow.completed == {EventType.A}
     assert flow.failed == {EventType.A, EventType.B}
     assert len(dispatcher.dlq) == 2
@@ -115,7 +115,7 @@ async def test_replay_failed_dependency_does_not_revive_dependent():
 
     assert shipping.calls == 1
     assert shipping_event.eid in dispatcher.event_state.completed
-    assert dispatcher.handler_state.done == {payment_key, shipping_key}
+    assert not dispatcher.handler_state.done
     assert flow.completed == {EventType.A, EventType.B}
     assert len(dispatcher.dlq) == 2
 
@@ -163,7 +163,7 @@ async def test_idempotency_is_at_most_once_success_not_exactly_once():
 
     assert payment.calls == 2  # 失败尝试会重复执行，不是 exactly-once
     assert shipping.calls == 0  # B 不会因为 A 后来成功而自动复活
-    assert dispatcher.handler_state.done == {payment_key}
+    assert not dispatcher.handler_state.done
     assert payment_key not in dispatcher.handler_state.running
     assert shipping_key not in dispatcher.handler_state.done
     assert dispatcher.event_state.completed == {payment_event.eid}
@@ -177,7 +177,7 @@ async def test_idempotency_is_at_most_once_success_not_exactly_once():
     await dispatcher.publish(payment_event)
     await asyncio.sleep(0.05)
     assert payment.calls == 2
-    assert dispatcher.handler_state.done == {payment_key}
+    assert not dispatcher.handler_state.done
 
     await dispatcher.close()
     await runner
@@ -194,7 +194,6 @@ async def test_replayed_a_success_does_not_execute_cascaded_b():
 
     payment_event = make_payment()
     shipping_event = make_shipping()
-    payment_key = (payment_event.eid, "payment-handler")
     shipping_key = (shipping_event.eid, "shipping-handler")
 
     runner = asyncio.create_task(dispatcher.run())
@@ -228,7 +227,7 @@ async def test_replayed_a_success_does_not_execute_cascaded_b():
     assert flow.failed == {EventType.A, EventType.B}
     assert flow.waiting == {}
     assert dispatcher.event_state.completed == {payment_event.eid}
-    assert dispatcher.handler_state.done == {payment_key}
+    assert not dispatcher.handler_state.done
 
     # T2：B 的等待记录已不存在，_on_success(A) 无法唤醒或重投 B
     assert shipping.calls == 0

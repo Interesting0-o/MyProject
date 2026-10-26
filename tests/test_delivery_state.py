@@ -66,10 +66,7 @@ async def test_partial_success_only_retries_failed_handler():
     await _wait_until(lambda: EventType.A in flow.completed)
 
     assert event.eid in dispatcher.event_state.completed
-    assert dispatcher.handler_state.done == {
-        (event.eid, "succeeded"),
-        (event.eid, "retried"),
-    }
+    assert not dispatcher.handler_state.done
     assert dispatcher.handler_state.running == set()
     assert succeeded.calls == 1
     assert retried.calls == 2
