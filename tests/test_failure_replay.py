@@ -166,7 +166,7 @@ async def test_idempotency_is_at_most_once_success_not_exactly_once():
     assert not dispatcher.handler_state.done
     assert payment_key not in dispatcher.handler_state.running
     assert shipping_key not in dispatcher.handler_state.done
-    assert dispatcher.event_state.completed == {payment_event.eid}
+    assert set(dispatcher.event_state.completed) == {payment_event.eid}
 
     flow = dispatcher.flows["order-123"]
     assert flow.completed == {EventType.A}
@@ -226,7 +226,7 @@ async def test_replayed_a_success_does_not_execute_cascaded_b():
     assert flow.completed == {EventType.A}
     assert flow.failed == {EventType.A, EventType.B}
     assert flow.waiting == {}
-    assert dispatcher.event_state.completed == {payment_event.eid}
+    assert set(dispatcher.event_state.completed) == {payment_event.eid}
     assert not dispatcher.handler_state.done
 
     # T2：B 的等待记录已不存在，_on_success(A) 无法唤醒或重投 B

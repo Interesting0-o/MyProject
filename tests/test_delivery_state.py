@@ -81,3 +81,32 @@ async def test_partial_success_only_retries_failed_handler():
 
     await dispatcher.close()
     await runner
+
+
+async def test_completed_ttl_expires_and_allows_reprocessing():
+    """固定 TTL 到期后，同一 eid 会被重新处理。"""
+    dispatcher = Dispatcher(
+        max_retry=0,
+        timeout=5,
+        check_interval=0.01,
+        completed_ttl=0.05,
+    )
+    handler = CountingHandler("ttl-handler")
+    dispatcher.register(EventType.A, handler)
+    event = make_event()
+
+    runner = asyncio.create_task(dispatcher.run())
+    await dispatcher.publish(event)
+    await _wait_until(lambda: event.eid in dispatcher.event_state.completed)
+    assert handler.calls == 1
+
+    await _wait_until(lambda: event.eid not in dispatcher.event_state.completed)
+
+    await dispatcher.publish(event)
+    await _wait_until(
+        lambda: event.eid in dispatcher.event_state.completed
+        and handler.calls == 2
+    )
+
+    await dispatcher.close()
+    await runner

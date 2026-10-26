@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -30,7 +31,7 @@ class EventState:
     """事件颗粒度的幂等状态。"""
 
     dispatching: set[str] = field(default_factory=set)  # 分发中的 eid
-    completed: set[str] = field(default_factory=set)  # 已完成的 eid
+    completed: dict[str, float] = field(default_factory=dict)  # eid -> 完成时间
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Dispatcher:
         max_retry: int = 3,
         timeout: float = 30,
         check_interval: float = 5.0,
+        completed_ttl: float = 300.0,
     ):
         """
         初始化分发器。
@@ -64,6 +66,7 @@ class Dispatcher:
             max_retry: 单个事件处理失败后的最大重试次数，总执行次数为 max_retry + 1。
             timeout: 事件等待依赖的超时时间，单位为秒。
             check_interval: 惰性超时检查的间隔时间，单位为秒。
+            completed_ttl: 已完成事件去重记录的保留时间，单位为秒。
         """
 
         self.queue = asyncio.Queue[Event | None](maxsize=maxsize)  # 事件接受队列
@@ -74,6 +77,7 @@ class Dispatcher:
         self.max_retry = max_retry  # 最大重试机会
         self.timeout = timeout  # 事件超时时间,单位为秒
         self.check_interval = check_interval  # 超时检查间隔,单位为秒
+        self.completed_ttl = completed_ttl  # 已完成事件去重保留时间,单位为秒
 
         # 依赖关系表，元素为 (依赖方, 被依赖方)
         self.dependence_rule: list[tuple[EventType, EventType]] = []
@@ -179,7 +183,7 @@ class Dispatcher:
     def _commit_success(self, e: Event) -> FlowState:
         """同步提交事件成功状态，保证各视图同时生效。"""
         flow = self._get_flow(e.correlation_id)
-        self.event_state.completed.add(e.eid)
+        self.event_state.completed[e.eid] = time.monotonic()
         flow.completed.add(e.event_type)
         self._clear_handler_state(e.eid)
         self.event_state.dispatching.discard(e.eid)
@@ -349,9 +353,17 @@ class Dispatcher:
         # 如果经过的时间 >= 超时时间，说明已超时
         return elapsed >= timedelta(seconds=self.timeout)
 
+    def _gc_completed(self) -> None:
+        """按固定 TTL 清理已完成的 eid 去重记录。"""
+        now = time.monotonic()
+        for eid, completed_at in tuple(self.event_state.completed.items()):
+            if now - completed_at < self.completed_ttl:
+                break
+            del self.event_state.completed[eid]
+
     async def check(self):
         """
-        周期性检查挂起事件是否等待依赖超时。
+        周期性检查挂起事件超时，并清理过期的已完成事件记录。
 
         超时事件会先从 waiting 中移除，再按失败处理，防止后续依赖完成时
         被重复唤醒或重复写入死信队列。
@@ -377,6 +389,8 @@ class Dispatcher:
             # 统一处理超时事件，避免在遍历 waiting 时修改其结构
             for waiting_event in expired:
                 await self._on_failure(waiting_event, "依赖等待超时")
+
+            self._gc_completed()
 
     # ==========================================
     #               事件主循环
