@@ -19,6 +19,8 @@ class FlowState:
     waiting: dict[EventType, list[Event]] = field(default_factory=dict)
     completed: set[EventType] = field(default_factory=set)
     failed: set[EventType] = field(default_factory=set)
+    sealed_at: float | None = None
+    active: int = 0
 
 
 # ====================================
@@ -57,6 +59,7 @@ class Dispatcher:
         timeout: float = 30,
         check_interval: float = 5.0,
         completed_ttl: float = 300.0,
+        sealed_flow_ttl: float = 300.0,
     ):
         """
         初始化分发器。
@@ -67,6 +70,7 @@ class Dispatcher:
             timeout: 事件等待依赖的超时时间，单位为秒。
             check_interval: 惰性超时检查的间隔时间，单位为秒。
             completed_ttl: 已完成事件去重记录的保留时间，单位为秒。
+            sealed_flow_ttl: 已关闭业务流程的保留时间，单位为秒。
         """
 
         self.queue = asyncio.Queue[Event | None](maxsize=maxsize)  # 事件接受队列
@@ -78,6 +82,7 @@ class Dispatcher:
         self.timeout = timeout  # 事件超时时间,单位为秒
         self.check_interval = check_interval  # 超时检查间隔,单位为秒
         self.completed_ttl = completed_ttl  # 已完成事件去重保留时间,单位为秒
+        self.sealed_flow_ttl = sealed_flow_ttl  # 已关闭流程保留时间,单位为秒
 
         # 依赖关系表，元素为 (依赖方, 被依赖方)
         self.dependence_rule: list[tuple[EventType, EventType]] = []
@@ -159,6 +164,12 @@ class Dispatcher:
     def _get_flow(self, correlation_id: str) -> FlowState:
         """获取或创建指定业务流程的顺序状态。"""
         return self.flows.setdefault(correlation_id, FlowState())
+
+    def seal_flow(self, correlation_id: str) -> None:
+        """关闭业务流程，拒绝后续新事件，并在 TTL 后清理。"""
+        flow = self._get_flow(correlation_id)
+        if flow.sealed_at is None:
+            flow.sealed_at = time.monotonic()
 
     def _get_dependent(self, e_type: EventType) -> list[EventType]:
         """
@@ -315,6 +326,8 @@ class Dispatcher:
         if eid in self.event_state.dispatching or eid in self.event_state.completed:
             return
 
+        flow = self._get_flow(e.correlation_id)
+        flow.active += 1
         self.event_state.dispatching.add(eid)
         try:
             results = await asyncio.gather(
@@ -333,6 +346,7 @@ class Dispatcher:
                 await self._on_failure(e, failure_reason)
         finally:
             # 失败后 eid 不留在任何事件集合中，从而允许重新投递时重放
+            flow.active -= 1
             self.event_state.dispatching.discard(eid)
 
     # ===========================================
@@ -361,9 +375,18 @@ class Dispatcher:
                 break
             del self.event_state.completed[eid]
 
+    def _gc_flows(self) -> None:
+        """按固定 TTL 清理已关闭且空闲的业务流程。"""
+        now = time.monotonic()
+        for correlation_id, flow in tuple(self.flows.items()):
+            if flow.sealed_at is None or flow.active or flow.waiting:
+                continue
+            if now - flow.sealed_at >= self.sealed_flow_ttl:
+                del self.flows[correlation_id]
+
     async def check(self):
         """
-        周期性检查挂起事件超时，并清理过期的已完成事件记录。
+        周期性检查挂起事件超时，并清理过期的已完成事件与已关闭流程。
 
         超时事件会先从 waiting 中移除，再按失败处理，防止后续依赖完成时
         被重复唤醒或重复写入死信队列。
@@ -391,6 +414,7 @@ class Dispatcher:
                 await self._on_failure(waiting_event, "依赖等待超时")
 
             self._gc_completed()
+            self._gc_flows()
 
     # ==========================================
     #               事件主循环
@@ -417,7 +441,9 @@ class Dispatcher:
                 break
 
             flow = self._get_flow(e.correlation_id)
-            if self._is_dependency_complete(e, flow):
+            if flow.sealed_at is not None:
+                self.dlq.append(DeadEvent(e=e, reason="业务流程已关闭"))
+            elif self._is_dependency_complete(e, flow):
                 # 所有依赖完成之后再执行任务分发，分发任务并发运行
                 task = asyncio.create_task(self._dispatch(e))
                 self.tasks.add(task)

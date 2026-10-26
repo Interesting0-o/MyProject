@@ -110,3 +110,38 @@ async def test_completed_ttl_expires_and_allows_reprocessing():
 
     await dispatcher.close()
     await runner
+
+
+async def test_sealed_flow_ttl_rejects_events_and_deletes_flow():
+    """seal_flow 后新事件进入 DLQ，空闲流程在 TTL 后删除。"""
+    dispatcher = Dispatcher(
+        max_retry=0,
+        timeout=5,
+        check_interval=0.01,
+        sealed_flow_ttl=0.05,
+    )
+    handler = CountingHandler("sealed-handler")
+    dispatcher.register(EventType.A, handler)
+    event = make_event()
+
+    runner = asyncio.create_task(dispatcher.run())
+    await dispatcher.publish(event)
+    await _wait_until(lambda: event.eid in dispatcher.event_state.completed)
+    assert handler.calls == 1
+
+    dispatcher.seal_flow("delivery-state")
+    flow = dispatcher.flows["delivery-state"]
+    assert flow.sealed_at is not None
+
+    late = make_event()
+    await dispatcher.publish(late)
+    await _wait_until(lambda: len(dispatcher.dlq) == 1)
+
+    assert dispatcher.dlq[0].e.eid == late.eid
+    assert dispatcher.dlq[0].reason == "业务流程已关闭"
+    assert handler.calls == 1
+
+    await _wait_until(lambda: "delivery-state" not in dispatcher.flows)
+
+    await dispatcher.close()
+    await runner
