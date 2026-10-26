@@ -1,11 +1,14 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from enum import Enum
 
 from myproject.schema.event import DeadEvent, Event, EventType
 
 from .handler import Handler
+
+# ====================================
+#     聚合数据结构：(顺序性)
+# ====================================
 
 
 @dataclass
@@ -17,29 +20,30 @@ class FlowState:
     failed: set[EventType] = field(default_factory=set)
 
 
-class DeliveryStatus(Enum):
-    """事件投递状态。"""
-
-    DISPATCHING = "dispatching"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class HandlerStatus(Enum):
-    """单个消费者对某个事件的处理状态。"""
-
-    RUNNING = "running"
-    DONE = "done"
-    FAILED = "failed"
+# ====================================
+#       聚合数据结构:(幂等性)
+# ====================================
 
 
 @dataclass
-class DeliveryState:
-    """单个事件（eid）的幂等状态。"""
+class EventState:
+    """事件颗粒度的幂等状态。"""
 
-    status: DeliveryStatus = DeliveryStatus.DISPATCHING
-    handlers: dict[str, HandlerStatus] = field(default_factory=dict)
-    #  键指代handler_id 值为其状态
+    dispatching: set[str] = field(default_factory=set)  # 分发中的 eid
+    completed: set[str] = field(default_factory=set)  # 已完成的 eid
+
+
+@dataclass
+class HandlerState:
+    """handler 颗粒度的幂等状态。"""
+
+    running: set[tuple[str, str]] = field(default_factory=set)  # (eid, handler_id)
+    done: set[tuple[str, str]] = field(default_factory=set)  # (eid, handler_id)
+
+
+# =======================================
+#       核心类：事件接收/分发中心
+# =======================================
 
 
 class Dispatcher:
@@ -76,7 +80,8 @@ class Dispatcher:
         # 依赖关系为**前者依赖后者的完成**
         self.registry: dict[EventType, list[Handler]] = {}  # 消费者注册字典
 
-        self.deliveries: dict[str, DeliveryState] = {}  # eid -> 投递幂等状态
+        self.event_state = EventState()  # 事件颗粒度幂等状态
+        self.handler_state = HandlerState()  # handler 颗粒度幂等状态
 
         self.tasks: set[asyncio.Task] = set()  # 正在运行的分发任务，关闭时需要等待完成
 
@@ -259,24 +264,25 @@ class Dispatcher:
         Returns:
             成功时返回 None；全部尝试都失败时返回最后一次的异常信息。
         """
-        delivery = self.deliveries[e.eid]
-        state = delivery.handlers.get(handler.handler_id)
-        if state in (HandlerStatus.DONE, HandlerStatus.RUNNING):
+        key = (e.eid, handler.handler_id)
+        if key in self.handler_state.running or key in self.handler_state.done:
             # 已完成或正在执行的消费者直接跳过；同一 gather 内会等待真正执行的那个
             return None
 
-        delivery.handlers[handler.handler_id] = HandlerStatus.RUNNING
-        for i in range(self.max_retry + 1):
-            try:
-                await handler(e)
-                delivery.handlers[handler.handler_id] = HandlerStatus.DONE
-                return None
-            except Exception as exc:
-                if i == self.max_retry:
-                    delivery.handlers[handler.handler_id] = HandlerStatus.FAILED
-                    return str(exc)
-                print(f"[info]事件执行失败，{2**i}秒后重试")
-                await asyncio.sleep(2**i)
+        self.handler_state.running.add(key)
+        try:
+            for i in range(self.max_retry + 1):
+                try:
+                    await handler(e)
+                    self.handler_state.done.add(key)
+                    return None
+                except Exception as exc:
+                    if i == self.max_retry:
+                        return str(exc)
+                    print(f"[info]事件执行失败，{2**i}秒后重试")
+                    await asyncio.sleep(2**i)
+        finally:
+            self.handler_state.running.discard(key)
 
     async def _dispatch(self, e: Event):
         """
@@ -287,34 +293,29 @@ class Dispatcher:
         同一个 eid 正在分发或已完成时不会重复分发；失败后再次投递则允许重放，
         已成功的消费者会跳过，只重试失败的消费者。
         """
-        delivery = self.deliveries.get(e.eid)
-        if delivery is None:
-            delivery = DeliveryState()
-            self.deliveries[e.eid] = delivery
-        elif (
-            delivery.status is DeliveryStatus.DISPATCHING
-            or delivery.status is DeliveryStatus.COMPLETED
-        ):
+        eid = e.eid
+        if eid in self.event_state.dispatching or eid in self.event_state.completed:
             return
-        else:
-            # 上一次投递失败，允许重放；失败的 handler 会重新执行
-            delivery.status = DeliveryStatus.DISPATCHING
 
-        results = await asyncio.gather(
-            *(
-                self._with_retry(e, handler)
-                for handler in self.registry.get(e.event_type, [])
+        self.event_state.dispatching.add(eid)
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._with_retry(e, handler)
+                    for handler in self.registry.get(e.event_type, [])
+                )
             )
-        )
-        failure_reason = next(
-            (result for result in results if result is not None), None
-        )
-        if failure_reason is None:
-            delivery.status = DeliveryStatus.COMPLETED
-            await self._on_success(e)
-        else:
-            delivery.status = DeliveryStatus.FAILED
-            await self._on_failure(e, failure_reason)
+            failure_reason = next(
+                (result for result in results if result is not None), None
+            )
+            if failure_reason is None:
+                self.event_state.completed.add(eid)
+                await self._on_success(e)
+            else:
+                await self._on_failure(e, failure_reason)
+        finally:
+            # 失败后 eid 不留在任何事件集合中，从而允许重新投递时重放
+            self.event_state.dispatching.discard(eid)
 
     # ===========================================
     #                 惰性检查

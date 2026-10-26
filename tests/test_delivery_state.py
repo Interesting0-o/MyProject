@@ -1,10 +1,6 @@
 import asyncio
 
-from myproject.core.dispatcher import (
-    DeliveryStatus,
-    Dispatcher,
-    HandlerStatus,
-)
+from myproject.core.dispatcher import Dispatcher
 from myproject.core.handler import Handler
 from myproject.schema.event import AData, Event, EventType
 
@@ -57,12 +53,10 @@ async def test_partial_success_only_retries_failed_handler():
     await dispatcher.publish(event)
     await _wait_until(lambda: bool(dispatcher.dlq))
 
-    delivery = dispatcher.deliveries[event.eid]
-    assert delivery.status is DeliveryStatus.FAILED
-    assert delivery.handlers == {
-        "succeeded": HandlerStatus.DONE,
-        "retried": HandlerStatus.FAILED,
-    }
+    assert event.eid not in dispatcher.event_state.dispatching
+    assert event.eid not in dispatcher.event_state.completed
+    assert dispatcher.handler_state.done == {(event.eid, "succeeded")}
+    assert dispatcher.handler_state.running == set()
     assert succeeded.calls == 1
     assert retried.calls == 1
 
@@ -71,18 +65,19 @@ async def test_partial_success_only_retries_failed_handler():
     flow = dispatcher.flows["delivery-state"]
     await _wait_until(lambda: EventType.A in flow.completed)
 
-    assert delivery.status is DeliveryStatus.COMPLETED
-    assert delivery.handlers == {
-        "succeeded": HandlerStatus.DONE,
-        "retried": HandlerStatus.DONE,
+    assert event.eid in dispatcher.event_state.completed
+    assert dispatcher.handler_state.done == {
+        (event.eid, "succeeded"),
+        (event.eid, "retried"),
     }
+    assert dispatcher.handler_state.running == set()
     assert succeeded.calls == 1
     assert retried.calls == 2
 
     # 已完成的事件再次投递：直接跳过，不重新分发
     await dispatcher.publish(event)
     await asyncio.sleep(0.05)
-    assert delivery.status is DeliveryStatus.COMPLETED
+    assert event.eid in dispatcher.event_state.completed
     assert succeeded.calls == 1
     assert retried.calls == 2
     assert flow.completed == {EventType.A}

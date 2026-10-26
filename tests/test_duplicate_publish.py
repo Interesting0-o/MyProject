@@ -1,10 +1,6 @@
 import asyncio
 
-from myproject.core.dispatcher import (
-    DeliveryStatus,
-    Dispatcher,
-    HandlerStatus,
-)
+from myproject.core.dispatcher import Dispatcher
 from myproject.core.handler import Handler
 from myproject.schema.event import AData, Event, EventType
 
@@ -70,14 +66,14 @@ async def test_a_concurrent_duplicate_processed_once(capsys):
 
     output = capsys.readouterr().out
     flow = dispatcher.flows["duplicate-success"]
-    delivery = dispatcher.deliveries[event.eid]
 
     assert handler.calls == 1
     assert flow.completed == {EventType.A}
     assert not flow.failed
     assert not dispatcher.dlq
-    assert delivery.status is DeliveryStatus.COMPLETED
-    assert delivery.handlers == {"recording-handler": HandlerStatus.DONE}
+    assert event.eid in dispatcher.event_state.completed
+    assert dispatcher.handler_state.done == {(event.eid, "recording-handler")}
+    assert not dispatcher.handler_state.running
 
     print(output)
     print(
@@ -99,13 +95,14 @@ async def test_b_replay_after_failure_succeeds(capsys):
     await dispatcher.publish(event)
     await _wait_until(lambda: bool(dispatcher.dlq))
     flow = dispatcher.flows["duplicate-replay"]
-    delivery = dispatcher.deliveries[event.eid]
     assert handler.calls == 1
     assert len(dispatcher.dlq) == 1
     assert flow.failed == {EventType.A}
     assert not flow.completed
-    assert delivery.status is DeliveryStatus.FAILED
-    assert delivery.handlers == {"fail-once-handler": HandlerStatus.FAILED}
+    assert event.eid not in dispatcher.event_state.dispatching
+    assert event.eid not in dispatcher.event_state.completed
+    assert not dispatcher.handler_state.done
+    assert not dispatcher.handler_state.running
 
     # 失败后再次投递同一个 eid，允许重放并只重试失败的 handler
     await dispatcher.publish(event)
@@ -120,8 +117,8 @@ async def test_b_replay_after_failure_succeeds(capsys):
     assert handler.calls == 2
     assert len(dispatcher.dlq) == 1
     assert flow.completed == {EventType.A}
-    assert delivery.status is DeliveryStatus.COMPLETED
-    assert delivery.handlers == {"fail-once-handler": HandlerStatus.DONE}
+    assert event.eid in dispatcher.event_state.completed
+    assert dispatcher.handler_state.done == {(event.eid, "fail-once-handler")}
 
     print(output)
     print(
