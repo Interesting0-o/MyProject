@@ -216,8 +216,10 @@ class Dispatcher:
         for waiting_event in expired:
             await self._on_failure(waiting_event, "依赖等待超时")
 
-        for waiting_event in ready:
-            await self._dispatch(waiting_event)
+        if ready:
+            await asyncio.gather(
+                *(self._dispatch(waiting_event) for waiting_event in ready)
+            )
 
     async def _on_failure(self, e: Event, reason: str):
         """
