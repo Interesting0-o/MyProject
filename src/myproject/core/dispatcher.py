@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -33,7 +34,8 @@ class EventState:
     """事件颗粒度的幂等状态。"""
 
     dispatching: set[str] = field(default_factory=set)  # 分发中的 eid
-    completed: dict[str, float] = field(default_factory=dict)  # eid -> 完成时间
+    completed: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    # eid -> 最后命中时间
 
 
 @dataclass
@@ -69,7 +71,7 @@ class Dispatcher:
             max_retry: 单个事件处理失败后的最大重试次数，总执行次数为 max_retry + 1。
             timeout: 事件等待依赖的超时时间，单位为秒。
             check_interval: 惰性超时检查的间隔时间，单位为秒。
-            completed_ttl: 已完成事件去重记录的保留时间，单位为秒。
+            completed_ttl: 已完成事件去重记录的空闲保留时间，命中时续期，单位为秒。
             sealed_flow_ttl: 已关闭业务流程的保留时间，单位为秒。
         """
 
@@ -81,7 +83,7 @@ class Dispatcher:
         self.max_retry = max_retry  # 最大重试机会
         self.timeout = timeout  # 事件超时时间,单位为秒
         self.check_interval = check_interval  # 超时检查间隔,单位为秒
-        self.completed_ttl = completed_ttl  # 已完成事件去重保留时间,单位为秒
+        self.completed_ttl = completed_ttl  # 已完成事件空闲去重保留时间,单位为秒
         self.sealed_flow_ttl = sealed_flow_ttl  # 已关闭流程保留时间,单位为秒
 
         # 依赖关系表，元素为 (依赖方, 被依赖方)
@@ -323,7 +325,11 @@ class Dispatcher:
         已成功的消费者会跳过，只重试失败的消费者。
         """
         eid = e.eid
-        if eid in self.event_state.dispatching or eid in self.event_state.completed:
+        if eid in self.event_state.completed:
+            self.event_state.completed[eid] = time.monotonic()
+            self.event_state.completed.move_to_end(eid)
+            return
+        if eid in self.event_state.dispatching:
             return
 
         flow = self._get_flow(e.correlation_id)
@@ -368,7 +374,7 @@ class Dispatcher:
         return elapsed >= timedelta(seconds=self.timeout)
 
     def _gc_completed(self) -> None:
-        """按固定 TTL 清理已完成的 eid 去重记录。"""
+        """按空闲 TTL 清理已完成的 eid 去重记录，最旧记录始终在头部。"""
         now = time.monotonic()
         for eid, completed_at in tuple(self.event_state.completed.items()):
             if now - completed_at < self.completed_ttl:

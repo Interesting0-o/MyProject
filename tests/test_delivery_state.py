@@ -145,3 +145,34 @@ async def test_sealed_flow_ttl_rejects_events_and_deletes_flow():
 
     await dispatcher.close()
     await runner
+
+
+async def test_completed_ttl_refreshes_on_duplicate_hit():
+    """重复事件命中时刷新 completed 的空闲时间并移动到队尾。"""
+    dispatcher = Dispatcher(max_retry=0, timeout=5, check_interval=60)
+    handler = CountingHandler("hit-handler")
+    dispatcher.register(EventType.A, handler)
+    first = make_event()
+    second = make_event()
+
+    runner = asyncio.create_task(dispatcher.run())
+    await dispatcher.publish(first)
+    await dispatcher.publish(second)
+    await _wait_until(
+        lambda: {first.eid, second.eid}
+        <= set(dispatcher.event_state.completed)
+    )
+    assert handler.calls == 2
+
+    last_hit = dispatcher.event_state.completed[first.eid]
+    await asyncio.sleep(0.01)
+    await dispatcher.publish(first)
+    await _wait_until(
+        lambda: dispatcher.event_state.completed[first.eid] > last_hit
+    )
+
+    assert handler.calls == 2
+    assert list(dispatcher.event_state.completed) == [second.eid, first.eid]
+
+    await dispatcher.close()
+    await runner
